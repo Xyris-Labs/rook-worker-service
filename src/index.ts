@@ -1,6 +1,6 @@
 import { connect, JSONCodec, type NatsConnection } from "nats";
 
-const NATS_URL = process.env.NATS_URL || "nats://localhost:4222";
+const NATS_URL = process.env.NATS_URL || "nats://host.docker.internal:4222";
 
 async function bootstrap() {
   let nc: NatsConnection;
@@ -11,23 +11,21 @@ async function bootstrap() {
 
     const jc = JSONCodec();
     const handshakePayload = {
-      type: "CODEX_WORKER",
-      tags: ["sandbox", "mcp"],
-      status: "idle",
+      type: "service.worker.codex",
+      name: `worker-${Math.random().toString(36).substring(7)}`,
     };
 
     const response = await nc.request(
-      "system.handshake",
+      "registry.handshake",
       jc.encode(handshakePayload),
       { timeout: 10000 }
     );
 
-    const { serviceId, clusterId } = jc.decode(response.data) as {
-      serviceId: string;
-      clusterId: string;
+    const { uuid } = jc.decode(response.data) as {
+      uuid: string;
     };
 
-    console.log(`Registration successful. ServiceID: ${serviceId}, ClusterID: ${clusterId}`);
+    console.log(`Registration successful. ServiceID: ${uuid}`);
 
     const handleShutdown = async () => {
       console.log("Gracefully shutting down NATS connection...");
