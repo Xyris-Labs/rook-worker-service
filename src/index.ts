@@ -5,6 +5,7 @@ const NATS_URL = process.env.NATS_URL || "nats://host.docker.internal:4222";
 
 async function bootstrap() {
   let nc: NatsConnection;
+  let cliManager: CliManager | null = null;
 
   try {
     nc = await connect({ servers: NATS_URL });
@@ -30,25 +31,40 @@ async function bootstrap() {
 
     console.log(`Registration successful. ServiceID: ${uuid}`);
 
-    const cliManager = new CliManager(["/bin/bash"], (data: string) => {
-      nc.publish(`worker.${uuid}.stdout`, sc.encode(data));
-    });
-
-    cliManager.start();
-
     nc.subscribe(`worker.${uuid}.stdin`, {
       callback: (err, msg) => {
         if (err) {
           console.error("Error receiving NATS message for stdin:", err);
           return;
         }
-        cliManager.write(sc.decode(msg.data));
+        cliManager?.write(sc.decode(msg.data));
+      },
+    });
+
+    nc.subscribe(`worker.${uuid}.control`, {
+      callback: (err, msg) => {
+        if (err) {
+          console.error("Error receiving NATS message for control:", err);
+          return;
+        }
+        try {
+          const payload = jc.decode(msg.data) as { action: string; command: string[] };
+          if (payload.action === "start" && payload.command) {
+            console.log(`Starting process: ${payload.command.join(" ")}`);
+            cliManager = new CliManager(payload.command, (data: string) => {
+              nc.publish(`worker.${uuid}.stdout`, sc.encode(data));
+            });
+            cliManager.start();
+          }
+        } catch (e) {
+          console.error("Failed to parse control message:", e);
+        }
       },
     });
 
     const handleShutdown = async () => {
       console.log("Gracefully shutting down...");
-      cliManager.kill();
+      cliManager?.kill();
       await nc.drain();
       process.exit(0);
     };

@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     git \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
+    && npm install -g @openai/codex \
     && curl -fsSL https://go.dev/dl/go1.22.1.linux-amd64.tar.gz | tar -C /usr/local -xzf - \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
