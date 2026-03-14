@@ -1,0 +1,9 @@
+{
+  "name": "rook-worker-sidecar",
+  "version": "0.1.0",
+  "main": "src/index.ts",
+  "type": "module",
+  "dependencies": {
+    "nats": "^2.28.2"
+  }
+}
