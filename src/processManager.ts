@@ -1,0 +1,46 @@
+export class CliManager {
+  private process: any;
+  private decoder = new TextDecoder();
+
+  constructor(
+    private command: string[],
+    private onOutput: (data: string) => void
+  ) {}
+
+  start() {
+    this.process = Bun.spawn(this.command, {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    this.readStream(this.process.stdout);
+    this.readStream(this.process.stderr);
+  }
+
+  private async readStream(stream: ReadableStream) {
+    const reader = stream.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        this.onOutput(this.decoder.decode(value));
+      }
+    } catch (err) {
+      // Stream closed or error
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  write(payload: string) {
+    if (this.process?.stdin) {
+      this.process.stdin.write(payload + "\n");
+      this.process.stdin.flush();
+    }
+  }
+
+  kill() {
+    this.process?.kill();
+  }
+}
