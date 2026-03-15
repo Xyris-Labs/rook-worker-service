@@ -1,14 +1,35 @@
 import { connect, StringCodec } from "nats";
+import * as fs from "node:fs";
 
 const NATS_URL = process.env.NATS_URL || "nats://localhost:4222";
 
+function formatOutput(data: string): string {
+  try {
+    return JSON.stringify(JSON.parse(data), null, 2);
+  } catch {
+    return data;
+  }
+}
+
 async function run() {
   const args = process.argv.slice(2);
-  const [command, topic, payload] = args;
+  const command = args[0];
+  const topic = args[1];
+  let payload = args[2];
 
   if (!command || !topic || (["pub", "req", "kv-get"].includes(command) && !payload)) {
     console.log("Usage: bun run src/rook-cli.ts <sub|pub|req|kv-keys|kv-get|kv-watch> <topic/bucket> [payload/key]");
     process.exit(1);
+  }
+
+  if (payload && payload.startsWith("@")) {
+    const filePath = payload.slice(1);
+    try {
+      payload = fs.readFileSync(filePath, "utf-8");
+    } catch (err) {
+      console.error(`Error reading file ${filePath}:`, err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
   }
 
   try {
@@ -21,7 +42,7 @@ async function run() {
         nc.subscribe(topic, {
           callback: (err, msg) => {
             if (err) console.error(err);
-            else console.log(sc.decode(msg.data));
+            else console.log(formatOutput(sc.decode(msg.data)));
           },
         });
         break;
@@ -35,7 +56,7 @@ async function run() {
       case "req":
         try {
           const rep = await nc.request(topic, sc.encode(payload), { timeout: 5000 });
-          console.log(sc.decode(rep.data));
+          console.log(formatOutput(sc.decode(rep.data)));
         } catch (err) {
           console.error("Request timed out or failed:", err instanceof Error ? err.message : err);
         }
@@ -64,7 +85,7 @@ async function run() {
           const kv = await js.views.kv(topic);
           const entry = await kv.get(payload);
           if (entry) {
-            console.log(sc.decode(entry.value));
+            console.log(formatOutput(sc.decode(entry.value)));
           } else {
             console.log("Key not found");
           }
@@ -81,7 +102,7 @@ async function run() {
           const kv = await js.views.kv(topic);
           const iter = await kv.watch();
           for await (const e of iter) {
-            console.log(`[${e.operation}] ${e.key} => ${sc.decode(e.value)}`);
+            console.log(`[${e.operation}] ${e.key} => ${formatOutput(sc.decode(e.value))}`);
           }
         } catch (err) {
           console.error("KV Error:", err instanceof Error ? err.message : err);
