@@ -1,6 +1,7 @@
 export class CliManager {
   private process: any;
   private decoder = new TextDecoder();
+  public exited!: Promise<number>;
 
   constructor(
     private command: string[],
@@ -16,6 +17,7 @@ export class CliManager {
       env: { ...process.env, ...this.env },
     });
 
+    this.exited = this.process.exited;
     this.readStream(this.process.stdout);
     this.readStream(this.process.stderr);
   }

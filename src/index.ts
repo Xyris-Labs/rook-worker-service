@@ -11,6 +11,11 @@ interface StartPayload {
   command: string[];
   env?: Record<string, string>;
   files?: { path: string; content: string }[];
+  authFlow?: {
+    loginCommand: string[];
+    targetFile: string;
+    runCommand: string[];
+  };
 }
 
 async function bootstrap() {
@@ -42,16 +47,46 @@ async function bootstrap() {
     console.log(`Registration successful. ServiceID: ${uuid}`);
 
     nc.subscribe(`worker.${uuid}.control`, {
-      callback: (err, msg) => {
+      callback: async (err, msg) => {
         if (err) {
           console.error("Error receiving NATS message for control:", err);
           return;
         }
         try {
           const payload = jc.decode(msg.data) as StartPayload;
-          if (payload.action === "start" && payload.processId && payload.command) {
+          if (payload.action === "start" && payload.processId) {
             if (processes.has(payload.processId)) {
               console.error(`Process already exists: ${payload.processId}`);
+              return;
+            }
+
+            // Provisioning / Auth Flow
+            if (payload.authFlow && (!payload.files || payload.files.length === 0)) {
+              console.log("Initiating autonomous provisioning flow...");
+              const provisioner = new CliManager(
+                payload.authFlow.loginCommand,
+                (data: string) => {
+                  nc.publish(`worker.${uuid}.${payload.processId}.stdout`, sc.encode(data));
+                },
+                payload.env
+              );
+
+              provisioner.start();
+              await provisioner.exited;
+
+              if (fs.existsSync(payload.authFlow.targetFile)) {
+                const newProfile = fs.readFileSync(payload.authFlow.targetFile, "utf-8");
+                nc.publish(`worker.${uuid}.${payload.processId}.profile_generated`, sc.encode(newProfile));
+                console.log("Provisioning complete, pivoting to execution mode...");
+                payload.command = payload.authFlow.runCommand;
+              } else {
+                console.error(`Provisioning failed: target file ${payload.authFlow.targetFile} not found.`);
+                return;
+              }
+            }
+
+            if (!payload.command) {
+              console.error(`No command provided for process ${payload.processId}`);
               return;
             }
 
@@ -89,7 +124,7 @@ async function bootstrap() {
             });
           }
         } catch (e) {
-          console.error("Failed to parse control message:", e);
+          console.error("Failed to parse or process control message:", e);
         }
       },
     });
