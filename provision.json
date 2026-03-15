@@ -1,0 +1,11 @@
+{
+  "action": "start",
+  "processId": "codex1",
+  "command": ["codex", "app-server"],
+  "env": { "CODEX_HOME": "/tmp/codex1/.codex" },
+  "authFlow": {
+    "loginCommand": ["codex", "login", "--device-auth"],
+    "targetFile": "/tmp/codex1/.codex/auth.json",
+    "runCommand": ["codex", "app-server"]
+  }
+}

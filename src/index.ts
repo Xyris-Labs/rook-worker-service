@@ -63,9 +63,15 @@ async function bootstrap() {
             // Provisioning / Auth Flow
             if (payload.authFlow && (!payload.files || payload.files.length === 0)) {
               console.log("Initiating autonomous provisioning flow...");
+
+              if (payload.env && payload.env.CODEX_HOME) {
+                 fs.mkdirSync(payload.env.CODEX_HOME, { recursive: true });
+              }
+
               const provisioner = new CliManager(
                 payload.authFlow.loginCommand,
                 (data: string) => {
+                  process.stdout.write(data);
                   nc.publish(`worker.${uuid}.${payload.processId}.stdout`, sc.encode(data));
                 },
                 payload.env
@@ -104,6 +110,7 @@ async function bootstrap() {
             const cliManager = new CliManager(
               payload.command,
               (data: string) => {
+                process.stdout.write(data);
                 nc.publish(`worker.${uuid}.${payload.processId}.stdout`, sc.encode(data));
               },
               payload.env
