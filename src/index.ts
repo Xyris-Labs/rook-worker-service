@@ -38,6 +38,7 @@ async function bootstrap() {
       type: "service.worker.codex",
       name: `worker-${Math.random().toString(36).substring(7)}`,
     };
+    const registryKey = `${handshakePayload.type}.${handshakePayload.name}`;
 
     const response = await nc.request(
       "registry.handshake",
@@ -50,6 +51,11 @@ async function bootstrap() {
     };
 
     console.log(`Registration successful. ServiceID: ${uuid}`);
+
+    // Send liveness heartbeat every 15 seconds
+    setInterval(() => {
+      nc.publish("registry.heartbeat", jc.encode({ key: registryKey, uuid }));
+    }, 15000);
 
     // Serve the UI bundle
     nc.subscribe(`worker.${uuid}.get_ui`, {
@@ -167,6 +173,9 @@ async function bootstrap() {
         console.log(`Killing process ${id}...`);
         manager.kill();
       }
+      console.log("Deregistering from Hub...");
+      nc.publish("registry.deregister", jc.encode({ key: registryKey }));
+
       await nc.drain();
       process.exit(0);
     };
