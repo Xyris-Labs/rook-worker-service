@@ -6,8 +6,8 @@ async function run() {
   const args = process.argv.slice(2);
   const [command, topic, payload] = args;
 
-  if (!command || !topic || (["pub", "req"].includes(command) && !payload)) {
-    console.log("Usage: bun run src/rook-cli.ts <sub|pub|req> <topic> [payload]");
+  if (!command || !topic || (["pub", "req", "kv-get"].includes(command) && !payload)) {
+    console.log("Usage: bun run src/rook-cli.ts <sub|pub|req|kv-keys|kv-get|kv-watch> <topic/bucket> [payload/key]");
     process.exit(1);
   }
 
@@ -43,8 +43,53 @@ async function run() {
         process.exit(0);
         break;
 
+      case "kv-keys":
+        try {
+          const js = nc.jetstream();
+          const kv = await js.views.kv(topic);
+          const keys = await kv.keys();
+          for await (const k of keys) {
+            console.log(k);
+          }
+        } catch (err) {
+          console.error("KV Error:", err instanceof Error ? err.message : err);
+        }
+        await nc.drain();
+        process.exit(0);
+        break;
+
+      case "kv-get":
+        try {
+          const js = nc.jetstream();
+          const kv = await js.views.kv(topic);
+          const entry = await kv.get(payload);
+          if (entry) {
+            console.log(sc.decode(entry.value));
+          } else {
+            console.log("Key not found");
+          }
+        } catch (err) {
+          console.error("KV Error:", err instanceof Error ? err.message : err);
+        }
+        await nc.drain();
+        process.exit(0);
+        break;
+
+      case "kv-watch":
+        try {
+          const js = nc.jetstream();
+          const kv = await js.views.kv(topic);
+          const iter = await kv.watch();
+          for await (const e of iter) {
+            console.log(`[${e.operation}] ${e.key} => ${sc.decode(e.value)}`);
+          }
+        } catch (err) {
+          console.error("KV Error:", err instanceof Error ? err.message : err);
+        }
+        break;
+
       default:
-        console.log("Usage: bun run src/rook-cli.ts <sub|pub|req> <topic> [payload]");
+        console.log("Usage: bun run src/rook-cli.ts <sub|pub|req|kv-keys|kv-get|kv-watch> <topic/bucket> [payload/key]");
         await nc.close();
         process.exit(1);
     }
