@@ -4,7 +4,8 @@ export class CliManager {
 
   constructor(
     private command: string[],
-    private onOutput: (data: string) => void
+    private onOutput: (data: string) => void,
+    private env?: Record<string, string>
   ) {}
 
   start() {
@@ -12,6 +13,7 @@ export class CliManager {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
+      env: { ...process.env, ...this.env },
     });
 
     this.readStream(this.process.stdout);
