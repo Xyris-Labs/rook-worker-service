@@ -1,5 +1,6 @@
 import { connect, JSONCodec, StringCodec, type NatsConnection } from "nats";
 import { CliManager } from "./processManager.ts";
+import { CodexAdapter } from "./adapters/codex.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -20,7 +21,7 @@ interface StartPayload {
 
 async function bootstrap() {
   let nc: NatsConnection;
-  const processes = new Map<string, CliManager>();
+  const processes = new Map<string, CliManager | CodexAdapter>();
 
   try {
     nc = await connect({ servers: NATS_URL });
@@ -107,17 +108,29 @@ async function bootstrap() {
               }
             }
 
-            const cliManager = new CliManager(
-              payload.command,
-              (data: string) => {
-                process.stdout.write(data);
-                nc.publish(`worker.${uuid}.${payload.processId}.stdout`, sc.encode(data));
-              },
-              payload.env
-            );
+            let activeProcess: CliManager | CodexAdapter;
+            if (payload.command[0] === "codex" && payload.command[1] === "app-server") {
+              activeProcess = new CodexAdapter(
+                payload.command,
+                (data: string) => {
+                  process.stdout.write(data);
+                  nc.publish(`worker.${uuid}.${payload.processId}.stdout`, sc.encode(data));
+                },
+                payload.env
+              );
+            } else {
+              activeProcess = new CliManager(
+                payload.command,
+                (data: string) => {
+                  process.stdout.write(data);
+                  nc.publish(`worker.${uuid}.${payload.processId}.stdout`, sc.encode(data));
+                },
+                payload.env
+              );
+            }
 
-            processes.set(payload.processId, cliManager);
-            cliManager.start();
+            processes.set(payload.processId, activeProcess);
+            activeProcess.start();
 
             // Subscribe to stdin for this process
             nc.subscribe(`worker.${uuid}.${payload.processId}.stdin`, {
