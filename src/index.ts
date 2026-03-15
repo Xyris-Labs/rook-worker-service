@@ -23,6 +23,10 @@ async function bootstrap() {
   let nc: NatsConnection;
   const processes = new Map<string, CliManager | CodexAdapter>();
 
+  // Load the bundled UI into memory
+  const uiBundlePath = path.join(process.cwd(), "dist", "CodexPlugin.js");
+  const uiBundle = fs.existsSync(uiBundlePath) ? fs.readFileSync(uiBundlePath, "utf-8") : "/* UI bundle not found */";
+
   try {
     nc = await connect({ servers: NATS_URL });
     console.log(`Connected to NATS at ${nc.getServer()}`);
@@ -46,6 +50,14 @@ async function bootstrap() {
     };
 
     console.log(`Registration successful. ServiceID: ${uuid}`);
+
+    // Serve the UI bundle
+    nc.subscribe(`worker.${uuid}.get_ui`, {
+      callback: (err, msg) => {
+        if (err) return;
+        msg.respond(sc.encode(uiBundle));
+      }
+    });
 
     nc.subscribe(`worker.${uuid}.control`, {
       callback: async (err, msg) => {

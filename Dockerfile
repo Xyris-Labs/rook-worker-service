@@ -24,5 +24,9 @@ RUN bun install
 # Copy source code
 COPY src ./src
 
+# Build the UI
+COPY build-ui.ts ./
+RUN bun run build-ui.ts
+
 # Entrypoint
 ENTRYPOINT ["bun", "run", "src/index.ts"]
