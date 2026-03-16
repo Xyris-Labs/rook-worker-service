@@ -1,19 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createRoot } from 'react-dom/client';
 
 const CodexPlugin = ({ uuid, natsPublish, natsSubscribe }: any) => {
   const [logs, setLogs] = useState<string[]>([]);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
-  // Listen for streaming logs from the worker's processes
   useEffect(() => {
     if (!natsSubscribe) return;
     const sub = natsSubscribe(`worker.${uuid}.*.stdout`, (data: string) => {
-      setLogs(prev => [...prev, data].slice(-200)); // Keep last 200 log entries
+      setLogs(prev => [...prev, data].slice(-200));
     });
     return () => { if (sub && sub.unsubscribe) sub.unsubscribe(); };
   }, [natsSubscribe, uuid]);
 
-  // Auto-scroll terminal
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
@@ -22,7 +21,6 @@ const CodexPlugin = ({ uuid, natsPublish, natsSubscribe }: any) => {
     natsPublish(`worker.${uuid}.control`, {
       action: 'start',
       processId: 'codex-main',
-      // Testing payload. We can replace with actual 'codex app-server' commands later
       command: ['echo', 'Starting Codex App Server...', '&&', 'sleep', '2', '&&', 'echo', 'Codex Online!'] 
     });
   };
@@ -76,5 +74,8 @@ const CodexPlugin = ({ uuid, natsPublish, natsSubscribe }: any) => {
   );
 };
 
-export const mount = CodexPlugin;
-export default CodexPlugin;
+export function mount(el: HTMLElement, props: any) {
+  const root = createRoot(el);
+  root.render(<CodexPlugin {...props} />);
+  return () => root.unmount();
+}

@@ -1,8 +1,8 @@
 await Bun.build({
   entrypoints: ['./src/ui/CodexPlugin.tsx'],
   outdir: './dist',
+  naming: 'CodexPlugin.js',
+  format: 'esm',
   minify: true,
-  format: "esm",
-  external: ['react', 'react-dom'] // The Cockpit will provide React
 });
-console.log("UI bundled successfully.");
+console.log("UI Bundle built at dist/CodexPlugin.js");
