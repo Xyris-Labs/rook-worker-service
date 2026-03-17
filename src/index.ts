@@ -35,7 +35,7 @@ async function bootstrap() {
     const sc = StringCodec();
 
     const handshakePayload = {
-      type: "service.worker.codex",
+      type: "service.worker.rook",
       name: `worker-${Math.random().toString(36).substring(7)}`,
     };
     const registryKey = `${handshakePayload.type}.${handshakePayload.name}`;

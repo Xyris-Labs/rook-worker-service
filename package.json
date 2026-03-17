@@ -1,5 +1,5 @@
 {
-  "name": "rook-worker-sidecar",
+  "name": "rook-worker",
   "version": "0.1.0",
   "main": "src/index.ts",
   "type": "module",
