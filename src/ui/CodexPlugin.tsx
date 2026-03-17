@@ -56,9 +56,15 @@ const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: any) => {
           appendLine(`[SYSTEM] Handshake Accepted (${payload.result.userAgent}). Opening workspace thread...`, 'text-blue-400');
           const threadReq = {
             jsonrpc: "2.0", id: 2, method: "thread/start",
-            params: { model: "gpt-5.3-codex", sandbox: "workspace-write", approvalPolicy: "on-request" }
+            params: { 
+              model: "gpt-5.3-codex", 
+              cwd: "/workspace",
+              sandbox: "workspace-write", 
+              approvalPolicy: "on-request",
+              experimentalRawEvents: false
+            }
           };
-          natsPublish(`agent.${agentUuid}.inbox`, JSON.stringify(threadReq));
+          natsPublish(`agent.${agentUuid}.inbox`, threadReq);
         }
 
         // B. Handle Thread Start Success -> Ready for Input
@@ -134,10 +140,10 @@ const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: any) => {
         jsonrpc: "2.0", id: messageIdRef.current++, method: "turn/start",
         params: {
           threadId: threadId,
-          input: [{ type: "text", text: userText }]
+          input: [{ type: "text", text: userText, text_elements: [] }]
         }
       };
-      natsPublish(`agent.${agentUuid}.inbox`, JSON.stringify(rpcPayload));
+      natsPublish(`agent.${agentUuid}.inbox`, rpcPayload);
     } else if (!agentUuid) {
       // Dumb proxy mode for login/auth
       natsPublish(`worker.${workerUuid}.codex-auth.stdin`, userText);

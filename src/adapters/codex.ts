@@ -81,12 +81,13 @@ export class CodexAdapter {
   }
 
   private handleOutput(data: string) {
-    // Broadcast the process's stdout to the agent's dedicated outbox
     if (this.nc && this.agentUuid) {
+      // Smart routing: Sovereign JSON-RPC outbox
       this.nc.publish(`agent.${this.agentUuid}.outbox`, sc.encode(data));
+    } else {
+      // Legacy routing: Only used before identity is established
+      this.onOutput(data);
     }
-    // Fallback to sidecar logging for debugging
-    this.onOutput(data);
   }
 
   write(payload: string) {
