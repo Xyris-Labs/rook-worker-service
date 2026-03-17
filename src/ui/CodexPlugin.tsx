@@ -1,15 +1,31 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 
+interface TerminalLine { text: string; color: string; isStream?: boolean }
+
 const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: any) => {
-  const [lines, setLines] = useState<string[]>(['Initializing Codex Mesh Interface...']);
+  const [lines, setLines] = useState<TerminalLine[]>([{text: 'Initializing Codex Mesh Interface...', color: 'text-gray-500'}]);
   const [input, setInput] = useState('');
   const [agentUuid, setAgentUuid] = useState<string | null>(null);
+  const [threadId, setThreadId] = useState<string | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
-  const messageIdRef = useRef(2);
+  const messageIdRef = useRef(3); // 1 = init, 2 = thread/start
 
-  const appendLine = (line: string, colorClass: string = 'text-gray-300') => {
-    setLines(prev => [...prev, `<span class="${colorClass}">${line}</span>`].slice(-300));
+  const appendLine = (text: string, color: string = 'text-gray-300') => {
+    setLines(prev => [...prev, { text, color }].slice(-300));
+  };
+
+  const appendStream = (text: string) => {
+    setLines(prev => {
+      const arr = [...prev];
+      const last = arr[arr.length - 1];
+      if (last && last.isStream) {
+        arr[arr.length - 1] = { ...last, text: last.text + text };
+      } else {
+        arr.push({ text, color: 'text-green-400', isStream: true });
+      }
+      return arr.slice(-300);
+    });
   };
 
   // 1. Raw stdout listener (Login flow & Discovery)
@@ -22,40 +38,59 @@ const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: any) => {
         appendLine(`\n[SYSTEM] Agent connection established via JetStream. UUID: ${agentMatch[1]}`, 'text-blue-400 font-bold');
         return;
       }
-
-      // Strip basic ANSI codes for clean web rendering
       const cleanText = data.replace(/\x1b\[[0-9;]*m/g, '');
       if (cleanText.trim()) appendLine(cleanText);
     });
     return () => { if (sub && sub.unsubscribe) sub.unsubscribe(); };
   }, [natsSubscribe, workerUuid]);
 
-  // 2. JSON-RPC outbox listener (Agent Execution)
+  // 2. JSON-RPC Protocol Handler
   useEffect(() => {
     if (!natsSubscribe || !agentUuid) return;
     const sub = natsSubscribe(`agent.${agentUuid}.outbox`, (data: string) => {
       try {
         const payload = JSON.parse(data);
 
-        // If it's a direct string result
-        if (payload.result && typeof payload.result === 'string') {
-          appendLine(payload.result, 'text-green-400');
-        } 
-        // If it's the initialize confirmation
-        else if (payload.id === 1 && payload.result?.userAgent) {
-          appendLine(`[SYSTEM] JSON-RPC Handshake Accepted. Server: ${payload.result.userAgent}`, 'text-blue-400');
+        // A. Handle Initialization Success -> Start Thread
+        if (payload.id === 1 && payload.result?.userAgent) {
+          appendLine(`[SYSTEM] Handshake Accepted (${payload.result.userAgent}). Opening workspace thread...`, 'text-blue-400');
+          const threadReq = {
+            jsonrpc: "2.0", id: 2, method: "thread/start",
+            params: { model: "gpt-5.3-codex", sandbox: "workspace-write", approvalPolicy: "on-request" }
+          };
+          natsPublish(`agent.${agentUuid}.inbox`, JSON.stringify(threadReq));
         }
-        // Log unexpected JSON for debugging
-        else {
-          appendLine(JSON.stringify(payload), 'text-gray-500');
+
+        // B. Handle Thread Start Success -> Ready for Input
+        else if (payload.id === 2 && payload.result) {
+          const tId = payload.result.thread?.id || payload.result.threadId;
+          if (tId) {
+            setThreadId(tId);
+            appendLine(`[SYSTEM] Workspace thread established: ${tId}. Jerry is online.`, 'text-blue-400 font-bold');
+            // Break the stream state so Jerry's first message starts on a fresh line
+            appendLine('', 'transparent'); 
+          }
         }
+
+        // C. Handle Streaming Output
+        else if (payload.method === 'item/agentMessage/delta') {
+          const delta = payload.params?.delta || "";
+          appendStream(delta);
+        }
+
+        // D. Handle Server Errors
+        else if (payload.method === 'error' || payload.error) {
+          const errMsg = payload.error?.message || payload.params?.error?.message || JSON.stringify(payload);
+          appendLine(`\n[AGENT ERROR] ${errMsg}`, 'text-red-500 font-bold');
+        }
+
       } catch (e) {
-        // Not JSON, just print it
-        appendLine(data, 'text-green-400');
+        // Fallback for non-JSON or broken pipes
+        appendLine(data, 'text-gray-500');
       }
     });
     return () => { if (sub && sub.unsubscribe) sub.unsubscribe(); };
-  }, [natsSubscribe, agentUuid]);
+  }, [natsSubscribe, agentUuid, natsPublish]);
 
   // Auto-scroll
   useEffect(() => {
@@ -87,25 +122,33 @@ const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: any) => {
 
     const userText = input;
     setInput('');
-    appendLine(`\n> ${userText}`, 'text-yellow-400');
 
-    if (agentUuid) {
-      // Smart Mode: Wrap in JSON-RPC
+    // Force a new line so user input breaks any existing streams
+    appendLine(`\n> ${userText}`, 'text-yellow-400');
+    // Add a dummy empty line so the upcoming agent stream starts on the next line
+    appendLine('', 'transparent'); 
+
+    if (agentUuid && threadId) {
+      // Fire the strict turn/start execution schema
       const rpcPayload = {
-        jsonrpc: "2.0", id: messageIdRef.current++, method: "chat/completions", // We will adjust the method if server rejects
-        params: { messages: [{ role: "user", content: userText }] }
+        jsonrpc: "2.0", id: messageIdRef.current++, method: "turn/start",
+        params: {
+          threadId: threadId,
+          input: [{ type: "text", text: userText }]
+        }
       };
       natsPublish(`agent.${agentUuid}.inbox`, JSON.stringify(rpcPayload));
-    } else {
-      // Dumb Mode: Raw stdin pipe
+    } else if (!agentUuid) {
+      // Dumb proxy mode for login/auth
       natsPublish(`worker.${workerUuid}.codex-auth.stdin`, userText);
       natsPublish(`worker.${workerUuid}.codex-main.stdin`, userText);
+    } else {
+      appendLine('[SYSTEM] Cannot execute turn: Workspace thread is not ready.', 'text-red-500');
     }
   };
 
   return (
     <div className="flex flex-col h-full bg-black text-gray-200 font-mono text-sm border border-gray-800 rounded-lg overflow-hidden relative">
-      {/* Top Control Bar */}
       <div className="absolute top-0 w-full flex items-center justify-between bg-gray-900 border-b border-gray-800 p-2 z-10">
         <div className="flex space-x-2 px-2">
           <div className="w-3 h-3 rounded-full bg-red-500"></div>
@@ -113,7 +156,7 @@ const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: any) => {
           <div className="w-3 h-3 rounded-full bg-green-500"></div>
         </div>
         <div className="text-xs text-gray-500">
-          {agentUuid ? `agent.${agentUuid.split('-')[0]}` : `worker.${workerUuid.split('-')[0]}`}
+          {threadId ? `thread.${threadId.split('-')[0]}` : agentUuid ? `agent.${agentUuid.split('-')[0]}` : `worker.${workerUuid.split('-')[0]}`}
         </div>
         <div className="flex gap-2">
           <button onClick={handleProvision} className="px-2 py-1 bg-gray-800 hover:bg-gray-700 text-xs text-yellow-500 rounded border border-gray-700">Auth</button>
@@ -121,24 +164,25 @@ const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: any) => {
         </div>
       </div>
 
-      {/* Terminal Window */}
       <div className="flex-1 overflow-y-auto p-4 pt-14 pb-12">
         {lines.map((line, i) => (
-          <div key={i} dangerouslySetInnerHTML={{ __html: line }} className="whitespace-pre-wrap leading-relaxed" />
+          <div key={i} className={`whitespace-pre-wrap leading-relaxed ${line.color}`}>
+            {line.text}
+          </div>
         ))}
         <div ref={logsEndRef} />
       </div>
 
-      {/* Command Line Input */}
       <form onSubmit={handleCommandSubmit} className="absolute bottom-0 w-full flex items-center bg-gray-900 border-t border-gray-800 p-2">
         <span className="text-green-500 font-bold mr-2 ml-2">{'>'}</span>
         <input
           type="text"
           value={input}
           onChange={e => setInput(e.target.value)}
-          className="flex-1 bg-transparent text-gray-200 outline-none placeholder-gray-700"
+          disabled={agentUuid !== null && threadId === null}
+          className="flex-1 bg-transparent text-gray-200 outline-none placeholder-gray-700 disabled:opacity-50"
           autoFocus
-          placeholder={agentUuid ? "Ready." : "Awaiting boot..."}
+          placeholder={threadId ? "Execute command..." : agentUuid ? "Opening workspace..." : "Awaiting boot..."}
         />
       </form>
     </div>
