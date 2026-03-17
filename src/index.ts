@@ -1,192 +1,134 @@
-import { connect, JSONCodec, StringCodec, type NatsConnection } from "nats";
+import { connect, JSONCodec, StringCodec } from "nats";
 import { CliManager } from "./processManager.ts";
 import { CodexAdapter } from "./adapters/codex.ts";
-import * as fs from "node:fs";
-import * as path from "node:path";
+import * as fs from "fs";
+import * as path from "path";
 
 const NATS_URL = process.env.NATS_URL || "nats://host.docker.internal:4222";
+const jc = JSONCodec();
+const sc = StringCodec();
 
-interface StartPayload {
-  action: "start";
-  processId: string;
-  command: string[];
-  env?: Record<string, string>;
-  files?: { path: string; content: string }[];
-  authFlow?: {
-    loginCommand: string[];
-    targetFile: string;
-    runCommand: string[];
+const activeProcesses = new Map<string, CliManager | CodexAdapter>();
+
+async function main() {
+  const nc = await connect({ servers: NATS_URL });
+  console.log(`[Worker] Connected to NATS at ${nc.getServer()}`);
+
+  // Initialize Librarian KV Store
+  const js = nc.jetstream();
+  const kv = await js.views.kv("librarian_profiles").catch(async () => {
+     return await js.views.kv("librarian_profiles", { history: 1 });
+  }).catch((e) => {
+     console.log("[Librarian] KV Store not available yet. Proceeding without profiles.");
+     return null;
+  });
+
+  const handshakePayload = {
+    type: "service.worker.rook",
+    name: `worker-${Math.random().toString(36).substring(7)}`,
   };
-}
 
-async function bootstrap() {
-  let nc: NatsConnection;
-  const processes = new Map<string, CliManager | CodexAdapter>();
+  const response = await nc.request("registry.handshake", jc.encode(handshakePayload), { timeout: 10000 });
+  const { uuid } = jc.decode(response.data) as { uuid: string };
+  console.log(`[Worker] Registration successful. ManagerID: ${uuid}`);
 
-  // Load the bundled UI into memory
-  const uiBundlePath = path.join(process.cwd(), "dist", "CodexPlugin.js");
-  const uiBundle = fs.existsSync(uiBundlePath) ? fs.readFileSync(uiBundlePath, "utf-8") : "/* UI bundle not found */";
+  // 1. STATUS ENDPOINT (Control Plane)
+  nc.subscribe(`worker.${uuid}.status`, {
+    callback: (err, msg) => {
+      if (err) return;
+      const status = {
+        workerId: uuid,
+        processes: Array.from(activeProcesses.entries()).map(([pid, instance]) => ({
+          processId: pid,
+          type: instance instanceof CodexAdapter ? 'agent' : 'cli',
+          agentUuid: instance instanceof CodexAdapter ? instance.getAgentUuid() : null
+        }))
+      };
+      if (msg.reply) msg.respond(jc.encode(status));
+    },
+  });
 
-  try {
-    nc = await connect({ servers: NATS_URL });
-    console.log(`Connected to NATS at ${nc.getServer()}`);
+  // Serve the UI bundle
+  nc.subscribe(`worker.${uuid}.get_ui`, {
+    callback: (err, msg) => {
+      if (err) return;
+      const uiBundlePath = path.join(process.cwd(), "dist", "CodexPlugin.js");
+      const uiBundle = fs.existsSync(uiBundlePath) ? fs.readFileSync(uiBundlePath, "utf-8") : "/* UI bundle not found */";
+      msg.respond(sc.encode(uiBundle));
+    }
+  });
 
-    const jc = JSONCodec();
-    const sc = StringCodec();
+  // 2. CONTROL ENDPOINT (Execution & Provisioning)
+  nc.subscribe(`worker.${uuid}.control`, {
+    callback: async (err, msg) => {
+      if (err) return;
+      const payload = jc.decode(msg.data) as any;
+      console.log(`[Control] Received action: ${payload.action} for ${payload.processId}`);
 
-    const handshakePayload = {
-      type: "service.worker.rook",
-      name: `worker-${Math.random().toString(36).substring(7)}`,
-    };
-    const registryKey = `${handshakePayload.type}.${handshakePayload.name}`;
-
-    const response = await nc.request(
-      "registry.handshake",
-      jc.encode(handshakePayload),
-      { timeout: 10000 }
-    );
-
-    const { uuid } = jc.decode(response.data) as {
-      uuid: string;
-    };
-
-    console.log(`Registration successful. ServiceID: ${uuid}`);
-
-    // Send liveness heartbeat every 15 seconds
-    setInterval(() => {
-      nc.publish("registry.heartbeat", jc.encode({ key: registryKey, uuid }));
-    }, 15000);
-
-    // Serve the UI bundle
-    nc.subscribe(`worker.${uuid}.get_ui`, {
-      callback: (err, msg) => {
-        if (err) return;
-        msg.respond(sc.encode(uiBundle));
-      }
-    });
-
-    nc.subscribe(`worker.${uuid}.control`, {
-      callback: async (err, msg) => {
-        if (err) {
-          console.error("Error receiving NATS message for control:", err);
-          return;
+      if (payload.action === "start") {
+        if (activeProcesses.has(payload.processId)) {
+           console.log(`[Control] Process ${payload.processId} is already running.`);
+           return;
         }
-        try {
-          const payload = jc.decode(msg.data) as StartPayload;
-          if (payload.action === "start" && payload.processId) {
-            if (processes.has(payload.processId)) {
-              console.error(`Process already exists: ${payload.processId}`);
-              return;
-            }
 
-            // Provisioning / Auth Flow
-            if (payload.authFlow && (!payload.files || payload.files.length === 0)) {
-              console.log("Initiating autonomous provisioning flow...");
+        // 3. LIBRARIAN PROFILE INJECTION
+        if (payload.profileId && kv) {
+           try {
+             const profileEntry = await kv.get(payload.profileId);
+             if (profileEntry) {
+               const codexDir = "/root/.codex";
+               if (!fs.existsSync(codexDir)) fs.mkdirSync(codexDir, { recursive: true });
 
-              if (payload.env && payload.env.CODEX_HOME) {
-                 fs.mkdirSync(payload.env.CODEX_HOME, { recursive: true });
-              }
+               // Seed the filesystem before process boot
+               fs.writeFileSync(path.join(codexDir, "config.json"), profileEntry.value);
+               console.log(`[Librarian] Injected profile ${payload.profileId} into workspace.`);
+             }
+           } catch(e) {
+             console.error(`[Librarian] Failed to load profile:`, e);
+           }
+        }
 
-              const provisioner = new CliManager(
-                payload.authFlow.loginCommand,
-                (data: string) => {
-                  process.stdout.write(data);
-                  nc.publish(`worker.${uuid}.${payload.processId}.stdout`, sc.encode(data));
-                },
-                payload.env
-              );
+        let instance;
+        const onOutput = (data: string) => {
+          nc.publish(`worker.${uuid}.${payload.processId}.stdout`, sc.encode(data));
+        };
 
-              provisioner.start();
-              await provisioner.exited;
+        if (payload.command && payload.command[1] === "app-server") {
+          instance = new CodexAdapter(payload.command, onOutput, process.env);
+        } else if (payload.authFlow) {
+          instance = new CliManager(payload.authFlow.loginCommand, onOutput, process.env);
+          // Future: Catch auth success here and push new config.json to Librarian KV
+        } else {
+          instance = new CliManager(payload.command, onOutput, process.env);
+        }
 
-              if (fs.existsSync(payload.authFlow.targetFile)) {
-                const newProfile = fs.readFileSync(payload.authFlow.targetFile, "utf-8");
-                nc.publish(`worker.${uuid}.${payload.processId}.profile_generated`, sc.encode(newProfile));
-                console.log("Provisioning complete, pivoting to execution mode...");
-                payload.command = payload.authFlow.runCommand;
-              } else {
-                console.error(`Provisioning failed: target file ${payload.authFlow.targetFile} not found.`);
-                return;
-              }
-            }
+        activeProcesses.set(payload.processId, instance);
 
-            if (!payload.command) {
-              console.error(`No command provided for process ${payload.processId}`);
-              return;
-            }
-
-            console.log(`Starting isolated process: ${payload.processId} -> ${payload.command.join(" ")}`);
-
-            // Inject files
-            if (payload.files) {
-              for (const file of payload.files) {
-                const dir = path.dirname(file.path);
-                fs.mkdirSync(dir, { recursive: true });
-                fs.writeFileSync(file.path, file.content);
-              }
-            }
-
-            let activeProcess: CliManager | CodexAdapter;
-            if (payload.command[0] === "codex" && payload.command[1] === "app-server") {
-              activeProcess = new CodexAdapter(
-                payload.command,
-                (data: string) => {
-                  process.stdout.write(data);
-                  nc.publish(`worker.${uuid}.${payload.processId}.stdout`, sc.encode(data));
-                },
-                payload.env
-              );
-            } else {
-              activeProcess = new CliManager(
-                payload.command,
-                (data: string) => {
-                  process.stdout.write(data);
-                  nc.publish(`worker.${uuid}.${payload.processId}.stdout`, sc.encode(data));
-                },
-                payload.env
-              );
-            }
-
-            processes.set(payload.processId, activeProcess);
-            activeProcess.start();
-
-            // Subscribe to stdin for this process
-            nc.subscribe(`worker.${uuid}.${payload.processId}.stdin`, {
-              callback: (err, stdinMsg) => {
-                if (err) {
-                  console.error(`Error on stdin for ${payload.processId}:`, err);
-                  return;
-                }
-                processes.get(payload.processId)?.write(sc.decode(stdinMsg.data));
-              }
-            });
+        const sub = nc.subscribe(`worker.${uuid}.${payload.processId}.stdin`, {
+          callback: (err, stdMsg) => {
+            if (err || !activeProcesses.has(payload.processId)) return;
+            instance.write(sc.decode(stdMsg.data) + "\n");
           }
-        } catch (e) {
-          console.error("Failed to parse or process control message:", e);
-        }
-      },
-    });
+        });
 
-    const handleShutdown = async () => {
-      console.log("Gracefully shutting down...");
-      for (const [id, manager] of processes) {
-        console.log(`Killing process ${id}...`);
-        manager.kill();
+        instance.start();
+
+        instance.exited.then((code: number) => {
+          console.log(`[Process] ${payload.processId} exited with code ${code}`);
+          activeProcesses.delete(payload.processId);
+          sub.unsubscribe();
+        });
       }
-      console.log("Deregistering from Hub...");
-      nc.publish("registry.deregister", jc.encode({ key: registryKey }));
 
-      await nc.drain();
-      process.exit(0);
-    };
-
-    process.on("SIGINT", handleShutdown);
-    process.on("SIGTERM", handleShutdown);
-
-  } catch (error) {
-    console.error("Failed to connect or register:", error instanceof Error ? error.message : error);
-    process.exit(1);
-  }
+      if (payload.action === "stop") {
+        const instance = activeProcesses.get(payload.processId);
+        if (instance) {
+          instance.kill();
+          activeProcesses.delete(payload.processId);
+        }
+      }
+    },
+  });
 }
 
-bootstrap();
+main().catch(console.error);

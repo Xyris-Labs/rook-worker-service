@@ -11,6 +11,8 @@ export class CodexAdapter {
   private nc!: NatsConnection;
   private agentUuid!: string;
 
+  public getAgentUuid() { return this.agentUuid; }
+
   constructor(
     private command: string[],
     private onOutput: (data: string) => void,
