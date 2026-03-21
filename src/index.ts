@@ -28,9 +28,15 @@ async function main() {
     name: `worker-${Math.random().toString(36).substring(7)}`,
   };
 
+  const registryKey = `${handshakePayload.type}.${handshakePayload.name}`;
   const response = await nc.request("registry.handshake", jc.encode(handshakePayload), { timeout: 10000 });
   const { uuid } = jc.decode(response.data) as { uuid: string };
   console.log(`[Worker] Registration successful. ManagerID: ${uuid}`);
+
+  // Restore liveness heartbeat so the Hub doesn't drop the worker
+  setInterval(() => {
+    nc.publish("registry.heartbeat", jc.encode({ key: registryKey, uuid }));
+  }, 15000);
 
   // 1. STATUS ENDPOINT (Control Plane)
   nc.subscribe(`worker.${uuid}.status`, {
@@ -71,36 +77,47 @@ async function main() {
            return;
         }
 
-        // 3. LIBRARIAN PROFILE INJECTION
-        if (payload.profileId && kv) {
-           try {
-             const profileEntry = await kv.get(payload.profileId);
-             if (profileEntry) {
-               const codexDir = "/root/.codex";
-               if (!fs.existsSync(codexDir)) fs.mkdirSync(codexDir, { recursive: true });
+      // Extract base workspace ID (strip 'auth-' prefix if present)
+      const wsId = payload.processId.replace("auth-", "");
+      const wsDir = path.join("/workspace", wsId);
+      const codexDir = path.join(wsDir, ".codex");
 
-               // Seed the filesystem before process boot
-               fs.writeFileSync(path.join(codexDir, "config.json"), profileEntry.value);
-               console.log(`[Librarian] Injected profile ${payload.profileId} into workspace.`);
-             }
-           } catch(e) {
-             console.error(`[Librarian] Failed to load profile:`, e);
+      // Create isolated physical directory for this workspace AND the .codex folder
+      if (!fs.existsSync(codexDir)) {
+        fs.mkdirSync(codexDir, { recursive: true });
+      }
+
+      // Force the process to use this isolated directory as its home
+      const isolatedEnv = { 
+        ...process.env, 
+        HOME: wsDir,
+        CODEX_HOME: codexDir 
+      };
+
+      if (payload.profileId && kv) {
+         try {
+           const profileEntry = await kv.get(payload.profileId);
+           if (profileEntry) {
+             fs.writeFileSync(path.join(codexDir, "auth.json"), profileEntry.value);
+             console.log(`[Librarian] Injected profile ${payload.profileId} into ${wsDir}`);
            }
-        }
+         } catch(e) {
+           console.error(`[Librarian] Failed to load profile:`, e);
+         }
+      }
 
-        let instance;
-        const onOutput = (data: string) => {
-          nc.publish(`worker.${uuid}.${payload.processId}.stdout`, sc.encode(data));
-        };
+      let instance;
+      const onOutput = (data: string) => {
+        nc.publish(`worker.${uuid}.${payload.processId}.stdout`, sc.encode(data));
+      };
 
-        if (payload.command && payload.command[1] === "app-server") {
-          instance = new CodexAdapter(payload.command, onOutput, process.env);
-        } else if (payload.authFlow) {
-          instance = new CliManager(payload.authFlow.loginCommand, onOutput, process.env);
-          // Future: Catch auth success here and push new config.json to Librarian KV
-        } else {
-          instance = new CliManager(payload.command, onOutput, process.env);
-        }
+      if (payload.command && payload.command[1] === "app-server") {
+        instance = new CodexAdapter(payload.command, onOutput, isolatedEnv);
+      } else if (payload.authFlow) {
+        instance = new CliManager(payload.authFlow.loginCommand, onOutput, isolatedEnv);
+      } else {
+        instance = new CliManager(payload.command, onOutput, isolatedEnv);
+      }
 
         activeProcesses.set(payload.processId, instance);
 
@@ -111,13 +128,19 @@ async function main() {
           }
         });
 
-        instance.start();
+        // Await the boot sequence to prevent race conditions on the exited promise
+        await instance.start();
 
-        instance.exited.then((code: number) => {
-          console.log(`[Process] ${payload.processId} exited with code ${code}`);
-          activeProcesses.delete(payload.processId);
-          sub.unsubscribe();
-        });
+        if (instance.exited) {
+          instance.exited.then((code: number) => {
+            console.log(`[Process] ${payload.processId} exited with code ${code}`);
+            activeProcesses.delete(payload.processId);
+            sub.unsubscribe();
+          }).catch(() => {
+            activeProcesses.delete(payload.processId);
+            sub.unsubscribe();
+          });
+        }
       }
 
       if (payload.action === "stop") {
