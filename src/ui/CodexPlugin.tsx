@@ -108,8 +108,11 @@ const AgentTerminal = ({ agentUuid, natsPublish, natsSubscribe }: any) => {
     e.preventDefault();
     if (!input.trim() || !threadId) return;
     const text = input; setInput('');
-    appendLine(`\n> ${text}`, 'text-yellow-400');
-    appendLine('', 'transparent');
+    setLines(prev => [
+      ...prev,
+      { text: `\n> ${text}`, color: 'text-yellow-400' },
+      { text: '', color: 'transparent' }
+    ].slice(-300));
     natsPublish(`agent.${agentUuid}.inbox`, {
       jsonrpc: "2.0", id: messageIdRef.current++, method: "turn/start",
       params: { threadId, input: [{ type: "text", text, text_elements: [] }] }
