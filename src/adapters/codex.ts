@@ -10,6 +10,10 @@ export class CodexAdapter {
   public exited: Promise<number>;
   private nc!: NatsConnection;
   private agentUuid!: string;
+  private heartbeatTimer?: any;
+  private activeThreadId: string | null = null;
+  private outboxBuffer: string[] = [];
+  private readonly BUFFER_LIMIT = 50;
 
   public getAgentUuid() { return this.agentUuid; }
 
@@ -44,6 +48,15 @@ export class CodexAdapter {
       const { uuid } = jc.decode(response.data) as { uuid: string };
       this.agentUuid = uuid;
       console.log(`[Agent] Sovereign Identity Established. AgentID: ${this.agentUuid}`);
+      
+      // Initiate Sovereign Heartbeat
+      this.heartbeatTimer = setInterval(() => {
+        this.nc.publish("registry.heartbeat", jc.encode({ 
+          key: `${handshakePayload.type}.${handshakePayload.name}`, 
+          uuid: this.agentUuid 
+        }));
+      }, 15000);
+
       this.onOutput(`[SYSTEM_EVENT:AGENT_ONLINE:${this.agentUuid}]\n`);
 
       // 3. Setup Dedicated JSON-RPC Inbox
@@ -51,8 +64,27 @@ export class CodexAdapter {
         callback: (err, msg) => {
           if (err) return;
           const rpcPayload = sc.decode(msg.data);
+          
+          // Thread State Sniffing (Inbound)
+          try {
+            const payload = JSON.parse(rpcPayload);
+            if (payload.method === "turn/start" && payload.params?.threadId) {
+              this.activeThreadId = payload.params.threadId;
+            }
+          } catch (e) {}
+
           // Pipe directly to the language server's stdin
           this.cli.write(rpcPayload); 
+        }
+      });
+
+      // State Request Listener
+      this.nc.subscribe(`agent.${this.agentUuid}.request_state`, {
+        callback: (err, msg) => {
+          this.nc.publish(`agent.${this.agentUuid}.state_reply`, jc.encode({
+            threadId: this.activeThreadId,
+            history: this.outboxBuffer
+          }));
         }
       });
 
@@ -83,7 +115,21 @@ export class CodexAdapter {
   }
 
   private handleOutput(data: string) {
+    // Rolling Outbox Buffer
+    this.outboxBuffer.push(data);
+    if (this.outboxBuffer.length > this.BUFFER_LIMIT) {
+      this.outboxBuffer.shift();
+    }
+
     if (this.nc && this.agentUuid) {
+      // Thread State Sniffing (Outbound)
+      try {
+        const payload = JSON.parse(data);
+        if (payload.id === 2 && payload.result?.thread?.id) {
+          this.activeThreadId = payload.result.thread.id;
+        }
+      } catch (e) {}
+
       // Smart routing: Sovereign JSON-RPC outbox
       this.nc.publish(`agent.${this.agentUuid}.outbox`, sc.encode(data));
     } else {
@@ -98,6 +144,9 @@ export class CodexAdapter {
   }
 
   async kill() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+    }
     this.cli.kill();
     if (this.nc) {
       await this.nc.drain();

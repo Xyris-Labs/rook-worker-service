@@ -5,47 +5,99 @@ interface TerminalLine { text: string; color: string; isStream?: boolean }
 interface Workspace { id: string; name: string; engine: string; status: string; agentUuid?: string; }
 
 const AgentTerminal = ({ agentUuid, natsPublish, natsSubscribe }: any) => {
-  const [lines, setLines] = useState<TerminalLine[]>([{text: `[SYSTEM] Connected to Agent JetStream: ${agentUuid}`, color: 'text-blue-400'}]);
+  const [lines, setLines] = useState<TerminalLine[]>([{text: `[SYSTEM] Connected to Agent JetStream: ${agentUuid}`, color: 'text-blue-400 font-bold'}]);
   const [input, setInput] = useState('');
   const [threadId, setThreadId] = useState<string | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const messageIdRef = useRef(3); 
 
-  const appendLine = (text: string, color: string = 'text-gray-300') => setLines(prev => [...prev, { text, color }].slice(-300));
-  const appendStream = (text: string) => {
-    setLines(prev => {
-      const arr = [...prev];
-      const last = arr[arr.length - 1];
-      if (last && last.isStream) { arr[arr.length - 1] = { ...last, text: last.text + text }; }
-      else { arr.push({ text, color: 'text-green-400', isStream: true }); }
-      return arr.slice(-300);
-    });
+  const processOutput = (data: string, currentLines: TerminalLine[]): TerminalLine[] => {
+    let nextLines = [...currentLines];
+    const appendToLines = (text: string, color: string = 'text-gray-300') => {
+      nextLines = [...nextLines, { text, color }].slice(-300);
+    };
+    const appendStreamToLines = (text: string) => {
+      const last = nextLines[nextLines.length - 1];
+      if (last && last.isStream) {
+        nextLines[nextLines.length - 1] = { ...last, text: last.text + text };
+      } else {
+        nextLines.push({ text, color: 'text-green-400', isStream: true });
+      }
+      nextLines = nextLines.slice(-300);
+    };
+
+    try {
+      const payload = JSON.parse(data);
+      if (payload.id === 1 && payload.result?.userAgent) {
+        appendToLines(`[SYSTEM] Handshake Accepted. Opening workspace thread...`, 'text-blue-400');
+      } else if (payload.id === 2 && payload.result) {
+        const tId = payload.result.thread?.id || payload.result.threadId;
+        if (tId) {
+          appendToLines(`[SYSTEM] Workspace established: ${tId}`, 'text-blue-400 font-bold');
+          appendToLines('', 'transparent');
+        }
+      } else if (payload.method === 'item/agentMessage/delta') {
+        appendStreamToLines(payload.params?.delta || "");
+      } else if (payload.method === 'error' || payload.error) {
+        const errMsg = payload.error?.message || payload.params?.error?.message || "Unknown Error";
+        appendToLines(`\n[AGENT ERROR] ${errMsg}`, 'text-red-500 font-bold');
+      }
+    } catch(e) {
+      if (!data.includes('[SYSTEM_EVENT:')) {
+        appendToLines(data);
+      }
+    }
+    return nextLines;
   };
+
+  // Memory Sync Listener
+  useEffect(() => {
+    if (!natsSubscribe || !agentUuid) return;
+    const sub = natsSubscribe(`agent.${agentUuid}.state_reply`, (data: string) => {
+      try {
+        const payload = JSON.parse(data);
+        if (payload.threadId) setThreadId(payload.threadId);
+        
+        if (payload.history && Array.isArray(payload.history)) {
+          let rebuiltLines: TerminalLine[] = [{text: `[SYSTEM] Connected to Agent JetStream: ${agentUuid}`, color: 'text-blue-400 font-bold'}];
+          payload.history.forEach((rawOutput: string) => {
+            rebuiltLines = processOutput(rawOutput, rebuiltLines);
+          });
+          rebuiltLines.push({ text: '[SYSTEM] Session synchronized from Agent memory.', color: 'text-gray-500 italic' });
+          setLines(rebuiltLines);
+        }
+      } catch (e) {
+        console.error("Failed to sync state from agent memory:", e);
+      }
+    });
+    return () => sub.unsubscribe();
+  }, [natsSubscribe, agentUuid]);
+
+  // Request state on mount
+  useEffect(() => {
+    if (!natsPublish || !agentUuid) return;
+    natsPublish(`agent.${agentUuid}.request_state`, {});
+  }, [natsPublish, agentUuid]);
 
   useEffect(() => {
     if (!natsSubscribe || !agentUuid) return;
     const sub = natsSubscribe(`agent.${agentUuid}.outbox`, (data: string) => {
+      if (data.includes('[SYSTEM_EVENT:')) return;
+      
+      setLines(prev => processOutput(data, prev));
+
       try {
         const payload = JSON.parse(data);
         if (payload.id === 1 && payload.result?.userAgent) {
-          appendLine(`[SYSTEM] Handshake Accepted. Opening workspace thread...`, 'text-blue-400');
           natsPublish(`agent.${agentUuid}.inbox`, {
             jsonrpc: "2.0", id: 2, method: "thread/start",
             params: { model: "gpt-5.3-codex", cwd: "/workspace", sandbox: "workspace-write", approvalPolicy: "on-request", experimentalRawEvents: false }
           });
         } else if (payload.id === 2 && payload.result) {
           const tId = payload.result.thread?.id || payload.result.threadId;
-          if (tId) {
-            setThreadId(tId);
-            appendLine(`[SYSTEM] Workspace established: ${tId}`, 'text-blue-400 font-bold');
-            appendLine('', 'transparent');
-          }
-        } else if (payload.method === 'item/agentMessage/delta') {
-          appendStream(payload.params?.delta || "");
-        } else if (payload.method === 'error' || payload.error) {
-          appendLine(`\n[AGENT ERROR] ${payload.error?.message || "Unknown Error"}`, 'text-red-500 font-bold');
+          if (tId) setThreadId(tId);
         }
-      } catch(e) {}
+      } catch (e) {}
     });
     return () => sub.unsubscribe();
   }, [natsSubscribe, agentUuid, natsPublish]);
@@ -95,23 +147,10 @@ export const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: an
       try { setWorkspaces(JSON.parse(data)); } catch(e) {}
     });
 
-    // Intercept agent UUID broadcast to update local state mapping
-    const logSub = natsSubscribe(`worker.${workerUuid}.*.stdout`, (data: string, err: any, msg: any) => {
-      const match = data.match(/\[SYSTEM_EVENT:AGENT_ONLINE:(.+)\]/);
-      if (match && msg.subject) {
-        const wsId = msg.subject.split('.')[2];
-        setWorkspaces(prev => prev.map(ws => ws.id === wsId ? { ...ws, agentUuid: match[1] } : ws));
-      }
-    });
+    // Request initial state on mount (backend will reply by publishing to .state)
+    natsPublish(`worker.${workerUuid}.request_state`, {});
 
-    // Request initial state on mount
-    natsPublish(`worker.${workerUuid}.request_state`, {}, {
-      callback: (err: any, msg: any) => {
-        if (msg) try { setWorkspaces(JSON.parse(new TextDecoder().decode(msg.data))); } catch(e) {}
-      }
-    });
-
-    return () => { sub.unsubscribe(); logSub.unsubscribe(); };
+    return () => sub.unsubscribe();
   }, [natsSubscribe, natsPublish, workerUuid]);
 
   const activeWs = workspaces.find(w => w.id === selectedWsId);

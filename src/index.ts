@@ -29,7 +29,7 @@ async function main() {
   }).catch(() => null);
 
   const handshakePayload = {
-    type: "service.workspace.manager",
+    type: "service.worker.manager",
     name: `manager-${Math.random().toString(36).substring(7)}`,
   };
   const registryKey = `${handshakePayload.type}.${handshakePayload.name}`;
@@ -46,9 +46,7 @@ async function main() {
 
   // Initial state request for when UI first connects
   nc.subscribe(`worker.${uuid}.request_state`, {
-    callback: (err, msg) => {
-      if (msg.reply) msg.respond(jc.encode(Array.from(workspaces.values())));
-    }
+    callback: () => broadcastState()
   });
 
   nc.subscribe(`worker.${uuid}.get_ui`, {
@@ -90,7 +88,19 @@ async function main() {
         const wsDir = path.join("/workspace", wsId);
         const env = { ...process.env, HOME: wsDir, CODEX_HOME: path.join(wsDir, ".codex") };
 
-        const onOutput = (data: string) => nc.publish(`worker.${uuid}.${wsId}.stdout`, sc.encode(data));
+        const onOutput = (data: string) => {
+          nc.publish(`worker.${uuid}.${wsId}.stdout`, sc.encode(data));
+
+          // Intercept agent identity natively and push to UI
+          const match = data.match(/\[SYSTEM_EVENT:AGENT_ONLINE:(.+)\]/);
+          if (match) {
+            const wsData = workspaces.get(wsId);
+            if (wsData) {
+              wsData.agentUuid = match[1];
+              broadcastState();
+            }
+          }
+        };
         const instance = new CodexAdapter(['codex', 'app-server'], onOutput, env);
         activeProcesses.set(wsId, instance);
 
