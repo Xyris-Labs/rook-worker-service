@@ -8,149 +8,141 @@ const NATS_URL = process.env.NATS_URL || "nats://host.docker.internal:4222";
 const jc = JSONCodec();
 const sc = StringCodec();
 
+interface Workspace {
+  id: string;
+  name: string;
+  engine: string;
+  status: 'created' | 'running' | 'stopped';
+  agentUuid?: string;
+}
+
+const workspaces = new Map<string, Workspace>();
 const activeProcesses = new Map<string, CliManager | CodexAdapter>();
 
 async function main() {
   const nc = await connect({ servers: NATS_URL });
-  console.log(`[Worker] Connected to NATS at ${nc.getServer()}`);
+  console.log(`[Manager] Connected to NATS at ${nc.getServer()}`);
 
-  // Initialize Librarian KV Store
   const js = nc.jetstream();
   const kv = await js.views.kv("librarian_profiles").catch(async () => {
      return await js.views.kv("librarian_profiles", { history: 1 });
-  }).catch((e) => {
-     console.log("[Librarian] KV Store not available yet. Proceeding without profiles.");
-     return null;
-  });
+  }).catch(() => null);
 
   const handshakePayload = {
-    type: "service.worker.rook",
-    name: `worker-${Math.random().toString(36).substring(7)}`,
+    type: "service.workspace.manager",
+    name: `manager-${Math.random().toString(36).substring(7)}`,
   };
-
   const registryKey = `${handshakePayload.type}.${handshakePayload.name}`;
+
   const response = await nc.request("registry.handshake", jc.encode(handshakePayload), { timeout: 10000 });
   const { uuid } = jc.decode(response.data) as { uuid: string };
-  console.log(`[Worker] Registration successful. ManagerID: ${uuid}`);
+  console.log(`[Manager] Registration successful. ManagerID: ${uuid}`);
 
-  // Restore liveness heartbeat so the Hub doesn't drop the worker
-  setInterval(() => {
-    nc.publish("registry.heartbeat", jc.encode({ key: registryKey, uuid }));
-  }, 15000);
+  setInterval(() => nc.publish("registry.heartbeat", jc.encode({ key: registryKey, uuid })), 15000);
 
-  // 1. STATUS ENDPOINT (Control Plane)
-  nc.subscribe(`worker.${uuid}.status`, {
+  const broadcastState = () => {
+    nc.publish(`worker.${uuid}.state`, jc.encode(Array.from(workspaces.values())));
+  };
+
+  // Initial state request for when UI first connects
+  nc.subscribe(`worker.${uuid}.request_state`, {
     callback: (err, msg) => {
-      if (err) return;
-      const status = {
-        workerId: uuid,
-        processes: Array.from(activeProcesses.entries()).map(([pid, instance]) => ({
-          processId: pid,
-          type: instance instanceof CodexAdapter ? 'agent' : 'cli',
-          agentUuid: instance instanceof CodexAdapter ? instance.getAgentUuid() : null
-        }))
-      };
-      if (msg.reply) msg.respond(jc.encode(status));
-    },
-  });
-
-  // Serve the UI bundle
-  nc.subscribe(`worker.${uuid}.get_ui`, {
-    callback: (err, msg) => {
-      if (err) return;
-      const uiBundlePath = path.join(process.cwd(), "dist", "CodexPlugin.js");
-      const uiBundle = fs.existsSync(uiBundlePath) ? fs.readFileSync(uiBundlePath, "utf-8") : "/* UI bundle not found */";
-      msg.respond(sc.encode(uiBundle));
+      if (msg.reply) msg.respond(jc.encode(Array.from(workspaces.values())));
     }
   });
 
-  // 2. CONTROL ENDPOINT (Execution & Provisioning)
+  nc.subscribe(`worker.${uuid}.get_ui`, {
+    callback: (err, msg) => {
+      if (err) return;
+      const uiPath = path.join(process.cwd(), "dist", "CodexPlugin.js");
+      msg.respond(sc.encode(fs.existsSync(uiPath) ? fs.readFileSync(uiPath, "utf-8") : "/* UI not found */"));
+    }
+  });
+
   nc.subscribe(`worker.${uuid}.control`, {
     callback: async (err, msg) => {
       if (err) return;
       const payload = jc.decode(msg.data) as any;
-      console.log(`[Control] Received action: ${payload.action} for ${payload.processId}`);
+      const wsId = payload.workspaceId;
+      console.log(`[Control] Action: ${payload.action} on ${wsId}`);
 
-      if (payload.action === "start") {
-        if (activeProcesses.has(payload.processId)) {
-           console.log(`[Control] Process ${payload.processId} is already running.`);
-           return;
+      if (payload.action === "create") {
+        const wsDir = path.join("/workspace", wsId);
+        const codexDir = path.join(wsDir, ".codex");
+        if (!fs.existsSync(codexDir)) fs.mkdirSync(codexDir, { recursive: true });
+
+        if (payload.profileId && kv) {
+           try {
+             const profile = await kv.get(payload.profileId);
+             if (profile) {
+               fs.writeFileSync(path.join(codexDir, "auth.json"), profile.value);
+               console.log(`[Librarian] Seeded auth.json for ${wsId}`);
+             }
+           } catch(e) { console.error(e); }
         }
 
-      // Extract base workspace ID (strip 'auth-' prefix if present)
-      const wsId = payload.processId.replace("auth-", "");
-      const wsDir = path.join("/workspace", wsId);
-      const codexDir = path.join(wsDir, ".codex");
-
-      // Create isolated physical directory for this workspace AND the .codex folder
-      if (!fs.existsSync(codexDir)) {
-        fs.mkdirSync(codexDir, { recursive: true });
+        workspaces.set(wsId, { id: wsId, name: payload.name, engine: payload.engine, status: 'created' });
+        broadcastState();
       }
 
-      // Force the process to use this isolated directory as its home
-      const isolatedEnv = { 
-        ...process.env, 
-        HOME: wsDir,
-        CODEX_HOME: codexDir 
-      };
+      if (payload.action === "start") {
+        if (activeProcesses.has(wsId)) return;
+        const wsDir = path.join("/workspace", wsId);
+        const env = { ...process.env, HOME: wsDir, CODEX_HOME: path.join(wsDir, ".codex") };
 
-      if (payload.profileId && kv) {
-         try {
-           const profileEntry = await kv.get(payload.profileId);
-           if (profileEntry) {
-             fs.writeFileSync(path.join(codexDir, "auth.json"), profileEntry.value);
-             console.log(`[Librarian] Injected profile ${payload.profileId} into ${wsDir}`);
-           }
-         } catch(e) {
-           console.error(`[Librarian] Failed to load profile:`, e);
-         }
-      }
+        const onOutput = (data: string) => nc.publish(`worker.${uuid}.${wsId}.stdout`, sc.encode(data));
+        const instance = new CodexAdapter(['codex', 'app-server'], onOutput, env);
+        activeProcesses.set(wsId, instance);
 
-      let instance;
-      const onOutput = (data: string) => {
-        nc.publish(`worker.${uuid}.${payload.processId}.stdout`, sc.encode(data));
-      };
+        const wsData = workspaces.get(wsId);
+        if (wsData) {
+          wsData.status = 'running';
+          wsData.agentUuid = instance.getAgentUuid(); // Wait, this is sync, UUID isn't populated until handshake. We will catch it via stdout intercept below.
+          broadcastState();
+        }
 
-      if (payload.command && payload.command[1] === "app-server") {
-        instance = new CodexAdapter(payload.command, onOutput, isolatedEnv);
-      } else if (payload.authFlow) {
-        instance = new CliManager(payload.authFlow.loginCommand, onOutput, isolatedEnv);
-      } else {
-        instance = new CliManager(payload.command, onOutput, isolatedEnv);
-      }
-
-        activeProcesses.set(payload.processId, instance);
-
-        const sub = nc.subscribe(`worker.${uuid}.${payload.processId}.stdin`, {
+        const sub = nc.subscribe(`worker.${uuid}.${wsId}.stdin`, {
           callback: (err, stdMsg) => {
-            if (err || !activeProcesses.has(payload.processId)) return;
-            instance.write(sc.decode(stdMsg.data) + "\n");
+            if (!err && activeProcesses.has(wsId)) instance.write(sc.decode(stdMsg.data) + "\n");
           }
         });
 
-        // Await the boot sequence to prevent race conditions on the exited promise
         await instance.start();
 
         if (instance.exited) {
-          instance.exited.then((code: number) => {
-            console.log(`[Process] ${payload.processId} exited with code ${code}`);
-            activeProcesses.delete(payload.processId);
+          instance.exited.then(() => {
+            activeProcesses.delete(wsId);
             sub.unsubscribe();
+            if (workspaces.has(wsId)) workspaces.get(wsId)!.status = 'stopped';
+            broadcastState();
           }).catch(() => {
-            activeProcesses.delete(payload.processId);
+            activeProcesses.delete(wsId);
             sub.unsubscribe();
+            if (workspaces.has(wsId)) workspaces.get(wsId)!.status = 'stopped';
+            broadcastState();
           });
         }
       }
 
       if (payload.action === "stop") {
-        const instance = activeProcesses.get(payload.processId);
+        const instance = activeProcesses.get(wsId);
         if (instance) {
           instance.kill();
-          activeProcesses.delete(payload.processId);
+          activeProcesses.delete(wsId);
+          if (workspaces.has(wsId)) workspaces.get(wsId)!.status = 'stopped';
+          broadcastState();
         }
       }
-    },
+
+      if (payload.action === "delete") {
+        const instance = activeProcesses.get(wsId);
+        if (instance) instance.kill();
+        activeProcesses.delete(wsId);
+        workspaces.delete(wsId);
+        fs.rmSync(path.join("/workspace", wsId), { recursive: true, force: true });
+        broadcastState();
+      }
+    }
   });
 }
 
