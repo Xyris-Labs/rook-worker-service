@@ -13,24 +13,18 @@ export async function startLibrarian() {
     return await js.views.kv("librarian_profiles", { history: 1 });
   });
 
-  // 1. INDEX LISTENER
-  nc.subscribe("librarian.index.request", {
-    callback: async (err, msg) => {
-      if (err) return;
-      try {
-        const keys = [];
-        const iter = await kv.keys();
-        for await (const k of iter) {
-          keys.push(k);
-        }
-        msg.respond(jc.encode(keys));
-      } catch (e) {
-        msg.respond(jc.encode([]));
-      }
+  // LIVE TELEMETRY STREAM
+  (async () => {
+    const watcher = await kv.watch();
+    for await (const entry of watcher) {
+      const key = entry.key;
+      const op = entry.operation;
+      const val = entry.value ? sc.decode(entry.value) : null;
+      nc.publish("librarian.telemetry", jc.encode({ key, op, value: val }));
     }
-  });
+  })().catch(console.error);
 
-  // 2. GET LISTENER
+  // 1. GET LISTENER
   nc.subscribe("librarian.profile.get", {
     callback: async (err, msg) => {
       if (err) return;
@@ -44,7 +38,7 @@ export async function startLibrarian() {
     }
   });
 
-  // 3. PUT LISTENER
+  // 2. PUT LISTENER
   nc.subscribe("librarian.profile.put", {
     callback: async (err, msg) => {
       if (err) return;
@@ -58,7 +52,7 @@ export async function startLibrarian() {
     }
   });
 
-  // 4. DELETE LISTENER
+  // 3. DELETE LISTENER
   nc.subscribe("librarian.profile.delete", {
     callback: async (err, msg) => {
       if (err) return;
@@ -72,5 +66,5 @@ export async function startLibrarian() {
     }
   });
 
-  console.log("[Librarian] RPC Handlers Active.");
+  console.log("[Librarian] Reactive Telemetry Active.");
 }

@@ -139,7 +139,7 @@ export const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: an
   const [selectedWsId, setSelectedWsId] = useState<string | null>(null);
 
   // Librarian State
-  const [profileKeys, setProfileKeys] = useState<string[]>([]);
+  const [vault, setVault] = useState<Record<string, string>>({});
   const [newProfileKey, setNewProfileKey] = useState('');
   const [newProfileValue, setNewProfileValue] = useState('');
 
@@ -179,34 +179,35 @@ export const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: an
     setNewName(''); setNewRepoUrl(''); setView('list');
   };
 
-  const refreshLibrarian = () => {
-    natsPublish('librarian.index.request', {}, {
-      callback: (err: any, msg: any) => {
-        if (msg) try { setProfileKeys(JSON.parse(new TextDecoder().decode(msg.data))); } catch(e) {}
-      }
-    });
-  };
-
   const handleAddProfile = (e: React.FormEvent) => {
     e.preventDefault();
-    natsPublish('librarian.profile.put', { key: newProfileKey, value: newProfileValue }, {
-      callback: () => {
-        setNewProfileKey('');
-        setNewProfileValue('');
-        refreshLibrarian();
-      }
-    });
+    natsPublish('librarian.profile.put', { key: newProfileKey, value: newProfileValue });
+    setNewProfileKey('');
+    setNewProfileValue('');
   };
 
   const handleDeleteProfile = (key: string) => {
-    natsPublish('librarian.profile.delete', { key }, {
-      callback: () => refreshLibrarian()
-    });
+    natsPublish('librarian.profile.delete', { key });
   };
 
   useEffect(() => {
-    if (view === 'librarian') refreshLibrarian();
-  }, [view, natsPublish]);
+    if (view !== 'librarian' || !natsSubscribe) return;
+    const sub = natsSubscribe('librarian.telemetry', (data: string) => {
+      try {
+        const payload = JSON.parse(data);
+        setVault(prev => {
+          const next = { ...prev };
+          if (payload.op === 'DEL' || payload.op === 'PURGE') {
+            delete next[payload.key];
+          } else if (payload.value !== null) {
+            next[payload.key] = payload.value;
+          }
+          return next;
+        });
+      } catch (e) {}
+    });
+    return () => sub.unsubscribe();
+  }, [view, natsSubscribe]);
 
   return (
     <div className="flex h-full w-full text-gray-200 font-sans bg-gray-950 overflow-hidden">
@@ -244,8 +245,8 @@ export const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: an
               <div>
                 <h3 className="text-xs font-bold text-gray-400 uppercase mb-4 tracking-widest">Stored Profiles</h3>
                 <div className="space-y-2">
-                  {profileKeys.length === 0 ? <div className="text-sm text-gray-600 italic">No profiles stored.</div> : null}
-                  {profileKeys.map(k => (
+                  {Object.keys(vault).length === 0 ? <div className="text-sm text-gray-600 italic">No profiles stored.</div> : null}
+                  {Object.entries(vault).map(([k, v]) => (
                     <div key={k} className="p-3 bg-gray-900 border border-gray-800 rounded font-mono text-xs text-blue-400 flex justify-between items-center group">
                       <span>{k}</span>
                       <button onClick={() => handleDeleteProfile(k)} className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400 transition-opacity">Delete</button>
