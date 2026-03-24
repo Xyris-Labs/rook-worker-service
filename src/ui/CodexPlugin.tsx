@@ -198,6 +198,12 @@ export const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: an
     });
   };
 
+  const handleDeleteProfile = (key: string) => {
+    natsPublish('librarian.profile.delete', { key }, {
+      callback: () => refreshLibrarian()
+    });
+  };
+
   useEffect(() => {
     if (view === 'librarian') refreshLibrarian();
   }, [view, natsPublish]);
@@ -242,6 +248,7 @@ export const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: an
                   {profileKeys.map(k => (
                     <div key={k} className="p-3 bg-gray-900 border border-gray-800 rounded font-mono text-xs text-blue-400 flex justify-between items-center group">
                       <span>{k}</span>
+                      <button onClick={() => handleDeleteProfile(k)} className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400 transition-opacity">Delete</button>
                     </div>
                   ))}
                 </div>

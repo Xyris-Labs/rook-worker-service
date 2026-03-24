@@ -58,5 +58,19 @@ export async function startLibrarian() {
     }
   });
 
+  // 4. DELETE LISTENER
+  nc.subscribe("librarian.profile.delete", {
+    callback: async (err, msg) => {
+      if (err) return;
+      try {
+        const { key } = jc.decode(msg.data) as { key: string };
+        await kv.purge(key);
+        msg.respond(jc.encode({ success: true }));
+      } catch (e) {
+        msg.respond(jc.encode({ error: "Failed to delete profile" }));
+      }
+    }
+  });
+
   console.log("[Librarian] RPC Handlers Active.");
 }
