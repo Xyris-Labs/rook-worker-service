@@ -141,6 +141,8 @@ export const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: an
   const [newName, setNewName] = useState('');
   const [newEngine, setNewEngine] = useState('codex');
   const [newProfile, setNewProfile] = useState('profile.codex.default');
+  const [newRepoUrl, setNewRepoUrl] = useState('');
+  const [newGitProfile, setNewGitProfile] = useState('secret.git.default');
 
   // Reactive State Subscription (No Polling)
   useEffect(() => {
@@ -161,9 +163,15 @@ export const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: an
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault();
     natsPublish(`worker.${workerUuid}.control`, {
-      action: 'create', workspaceId: `ws-${Date.now()}`, name: newName, engine: newEngine, profileId: newProfile === 'none' ? null : newProfile
+      action: 'create', 
+      workspaceId: `ws-${Date.now()}`, 
+      name: newName, 
+      engine: newEngine, 
+      profileId: newProfile === 'none' ? null : newProfile,
+      repoUrl: newRepoUrl || null,
+      gitProfileId: newGitProfile || null
     });
-    setNewName(''); setView('list');
+    setNewName(''); setNewRepoUrl(''); setView('list');
   };
 
   return (
@@ -213,6 +221,14 @@ export const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: an
                   <option value="profile.codex.default">profile.codex.default</option>
                   <option value="none">None (Requires Manual Auth)</option>
                 </select>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Git Repository URL (Optional)</label>
+                <input type="text" value={newRepoUrl} onChange={e => setNewRepoUrl(e.target.value)} className="w-full bg-gray-900 border border-gray-800 text-white rounded p-3 outline-none" placeholder="git@github.com:user/repo.git" />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-2">SSH Profile ID</label>
+                <input type="text" value={newGitProfile} onChange={e => setNewGitProfile(e.target.value)} className="w-full bg-gray-900 border border-gray-800 text-white rounded p-3 outline-none" placeholder="secret.git.default" />
               </div>
               <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded mt-4">Initialize Workspace</button>
             </form>

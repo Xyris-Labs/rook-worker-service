@@ -12,7 +12,7 @@ interface Workspace {
   id: string;
   name: string;
   engine: string;
-  status: 'created' | 'running' | 'stopped';
+  status: 'created' | 'provisioning' | 'running' | 'stopped';
   agentUuid?: string;
 }
 
@@ -65,22 +65,74 @@ async function main() {
       console.log(`[Control] Action: ${payload.action} on ${wsId}`);
 
       if (payload.action === "create") {
+        // Immediately set status to provisioning and broadcast
+        const ws: Workspace = { id: wsId, name: payload.name, engine: payload.engine, status: 'provisioning' };
+        workspaces.set(wsId, ws);
+        broadcastState();
+
         const wsDir = path.join("/workspace", wsId);
         const codexDir = path.join(wsDir, ".codex");
-        if (!fs.existsSync(codexDir)) fs.mkdirSync(codexDir, { recursive: true });
+        const sshDir = path.join(wsDir, ".ssh");
 
-        if (payload.profileId && kv) {
-           try {
-             const profile = await kv.get(payload.profileId);
-             if (profile) {
-               fs.writeFileSync(path.join(codexDir, "auth.json"), profile.value);
-               console.log(`[Librarian] Seeded auth.json for ${wsId}`);
-             }
-           } catch(e) { console.error(e); }
+        try {
+          if (!fs.existsSync(codexDir)) fs.mkdirSync(codexDir, { recursive: true });
+          if (!fs.existsSync(sshDir)) fs.mkdirSync(sshDir, { recursive: true });
+
+          // 1. LIBRARIAN PROFILE INJECTION (App Auth)
+          if (payload.profileId && kv) {
+             try {
+               const profile = await kv.get(payload.profileId);
+               if (profile) {
+                 fs.writeFileSync(path.join(codexDir, "auth.json"), profile.value);
+                 console.log(`[Librarian] Seeded auth.json for ${wsId}`);
+               }
+             } catch(e) { console.error(`[Librarian] App profile failed:`, e); }
+          }
+
+          // 2. SSH KEY INJECTION (Git Auth)
+          if (payload.gitProfileId && kv) {
+            try {
+              const gitProfile = await kv.get(payload.gitProfileId);
+              if (gitProfile) {
+                const keyPath = path.join(sshDir, "id_rsa");
+                fs.writeFileSync(keyPath, gitProfile.value);
+                fs.chmodSync(keyPath, 0o600);
+                console.log(`[Librarian] Injected SSH key for ${wsId}`);
+              }
+            } catch(e) { console.error(`[Librarian] Git profile failed:`, e); }
+          }
+
+          // 3. SECURE CLONE
+          if (payload.repoUrl) {
+            console.log(`[Provisioning] Cloning ${payload.repoUrl} into ${wsDir}...`);
+            const keyPath = path.join(sshDir, "id_rsa");
+            const hasKey = fs.existsSync(keyPath);
+            
+            const cloneProcess = Bun.spawn(["git", "clone", payload.repoUrl, "."], {
+              cwd: wsDir,
+              env: {
+                ...process.env,
+                GIT_SSH_COMMAND: hasKey 
+                  ? `ssh -i ${keyPath} -o StrictHostKeyChecking=no` 
+                  : "ssh -o StrictHostKeyChecking=no"
+              }
+            });
+            
+            const exitCode = await cloneProcess.exited;
+            if (exitCode !== 0) {
+              console.error(`[Provisioning] Clone failed with code ${exitCode}`);
+            } else {
+              console.log(`[Provisioning] Clone successful.`);
+            }
+          }
+
+        } catch (e) {
+          console.error(`[Provisioning] Fatal error during workspace setup:`, e);
+        } finally {
+          // Finalize state
+          ws.status = 'stopped';
+          broadcastState();
         }
-
-        workspaces.set(wsId, { id: wsId, name: payload.name, engine: payload.engine, status: 'created' });
-        broadcastState();
       }
 
       if (payload.action === "start") {
