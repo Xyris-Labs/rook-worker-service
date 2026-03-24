@@ -135,8 +135,13 @@ const AgentTerminal = ({ agentUuid, natsPublish, natsSubscribe }: any) => {
 
 export const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: any) => {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [view, setView] = useState<'list' | 'create' | 'details'>('list');
+  const [view, setView] = useState<'list' | 'create' | 'details' | 'librarian'>('list');
   const [selectedWsId, setSelectedWsId] = useState<string | null>(null);
+
+  // Librarian State
+  const [profileKeys, setProfileKeys] = useState<string[]>([]);
+  const [newProfileKey, setNewProfileKey] = useState('');
+  const [newProfileValue, setNewProfileValue] = useState('');
 
   const [newName, setNewName] = useState('');
   const [newEngine, setNewEngine] = useState('codex');
@@ -174,6 +179,29 @@ export const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: an
     setNewName(''); setNewRepoUrl(''); setView('list');
   };
 
+  const refreshLibrarian = () => {
+    natsPublish('librarian.index.request', {}, {
+      callback: (err: any, msg: any) => {
+        if (msg) try { setProfileKeys(JSON.parse(new TextDecoder().decode(msg.data))); } catch(e) {}
+      }
+    });
+  };
+
+  const handleAddProfile = (e: React.FormEvent) => {
+    e.preventDefault();
+    natsPublish('librarian.profile.put', { key: newProfileKey, value: newProfileValue }, {
+      callback: () => {
+        setNewProfileKey('');
+        setNewProfileValue('');
+        refreshLibrarian();
+      }
+    });
+  };
+
+  useEffect(() => {
+    if (view === 'librarian') refreshLibrarian();
+  }, [view, natsPublish]);
+
   return (
     <div className="flex h-full w-full text-gray-200 font-sans bg-gray-950 overflow-hidden">
       <div className="w-80 flex flex-col border-r border-gray-800 bg-gray-900">
@@ -182,8 +210,9 @@ export const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: an
           <p className="text-xs text-gray-500 font-mono mt-1">ID: {workerUuid.split('-')[0]}</p>
         </div>
 
-        <div className="p-4 border-b border-gray-800">
+        <div className="p-4 border-b border-gray-800 flex flex-col gap-2">
           <button onClick={() => setView('create')} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 rounded text-sm transition-colors">New Workspace</button>
+          <button onClick={() => setView('librarian')} className="w-full bg-gray-800 hover:bg-gray-700 text-white font-bold py-2 rounded text-sm transition-colors border border-gray-700">Librarian</button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4">
@@ -201,7 +230,40 @@ export const CodexPlugin = ({ uuid: workerUuid, natsPublish, natsSubscribe }: an
       </div>
 
       <div className="flex-1 flex flex-col bg-black">
-        {view === 'create' ? (
+        {view === 'librarian' ? (
+          <div className="p-6 max-w-4xl mx-auto w-full">
+            <h2 className="text-2xl font-bold text-white mb-6">Librarian Vault</h2>
+            
+            <div className="grid grid-cols-2 gap-8">
+              <div>
+                <h3 className="text-xs font-bold text-gray-400 uppercase mb-4 tracking-widest">Stored Profiles</h3>
+                <div className="space-y-2">
+                  {profileKeys.length === 0 ? <div className="text-sm text-gray-600 italic">No profiles stored.</div> : null}
+                  {profileKeys.map(k => (
+                    <div key={k} className="p-3 bg-gray-900 border border-gray-800 rounded font-mono text-xs text-blue-400 flex justify-between items-center group">
+                      <span>{k}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-gray-900 p-6 rounded-lg border border-gray-800">
+                <h3 className="text-xs font-bold text-gray-400 uppercase mb-4 tracking-widest">Add New Secret</h3>
+                <form onSubmit={handleAddProfile} className="space-y-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Key Name</label>
+                    <input required type="text" value={newProfileKey} onChange={e=>setNewProfileKey(e.target.value)} className="w-full bg-black border border-gray-700 rounded p-2 text-sm outline-none focus:border-blue-500" placeholder="secret.git.work" />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Raw Value</label>
+                    <textarea required value={newProfileValue} onChange={e=>setNewProfileValue(e.target.value)} className="w-full bg-black border border-gray-700 rounded p-2 text-sm outline-none focus:border-blue-500 h-40 font-mono" placeholder="Paste JSON or SSH Private Key..." />
+                  </div>
+                  <button type="submit" className="w-full bg-blue-600 py-2 rounded font-bold text-sm hover:bg-blue-500 transition-colors">Store in Vault</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        ) : view === 'create' ? (
           <div className="p-6 max-w-lg mx-auto w-full mt-10">
             <h2 className="text-2xl font-bold text-white mb-6">Create Environment</h2>
             <form onSubmit={handleCreate} className="space-y-4">

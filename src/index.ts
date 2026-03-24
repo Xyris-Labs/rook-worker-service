@@ -1,6 +1,7 @@
 import { connect, JSONCodec, StringCodec } from "nats";
 import { CliManager } from "./processManager.ts";
 import { CodexAdapter } from "./adapters/codex.ts";
+import { startLibrarian } from "./librarian.ts";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -20,6 +21,9 @@ const workspaces = new Map<string, Workspace>();
 const activeProcesses = new Map<string, CliManager | CodexAdapter>();
 
 async function main() {
+  // Start the Librarian Service
+  await startLibrarian().catch(e => console.error("[Librarian] Failed to start:", e));
+
   const nc = await connect({ servers: NATS_URL });
   console.log(`[Manager] Connected to NATS at ${nc.getServer()}`);
 
